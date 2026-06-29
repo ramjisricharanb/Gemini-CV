@@ -117,7 +117,7 @@ export default function CandidateDetailView({ candidate, jdLocation, onClose }) 
                 <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
                   <div 
                     className="bg-purple-600 h-full rounded-full transition-all duration-300"
-                    style={{ width: `${parsePercent(candidate.scoring?.mandatoryScore, 50)}%` }}
+                    style={{ width: `${parsePercent(candidate.scoring?.mandatoryScore, 60)}%` }}
                   />
                 </div>
               </div>
@@ -145,7 +145,7 @@ export default function CandidateDetailView({ candidate, jdLocation, onClose }) 
                 <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
                   <div 
                     className="bg-emerald-600 h-full rounded-full transition-all duration-300"
-                    style={{ width: `${parsePercent(candidate.scoring?.respScore, 20)}%` }}
+                    style={{ width: `${parsePercent(candidate.scoring?.respScore, 10)}%` }}
                   />
                 </div>
               </div>
