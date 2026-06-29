@@ -2,10 +2,30 @@ import { useState, useMemo } from 'react'
 import { exportResultsToExcel } from '../utils/exportToExcel'
 import CandidateDetailView from './CandidateDetailView'
 
+const getModelPricing = (modelId) => {
+  const id = modelId || 'gemini-3.5-flash'
+  const pricingMap = {
+    'gemini-3.5-flash': { input: 0.075, output: 0.30 },
+    'gemini-3.1-pro-preview': { input: 1.25, output: 5.00 },
+    'gemini-3.1-flash-lite': { input: 0.075, output: 0.30 },
+    'gemini-2.5-pro': { input: 1.25, output: 5.00 },
+    'gemini-2.5-flash': { input: 0.075, output: 0.30 },
+    'gemini-2.0-flash': { input: 0.075, output: 0.30 }
+  }
+  const rates = pricingMap[id] || (id.toLowerCase().includes('pro') ? { input: 1.25, output: 5.00 } : { input: 0.075, output: 0.30 })
+  return {
+    inputRate: rates.input / 1000000,
+    outputRate: rates.output / 1000000,
+    inputPerMillion: rates.input,
+    outputPerMillion: rates.output
+  }
+}
+
 export default function ResultsDashboard({ results, jdFile, resumeFiles, onStartOver }) {
   const [selectedCandidate, setSelectedCandidate] = useState(null)
   const [filterType, setFilterType] = useState('all')
   const [searchTerm, setSearchTerm] = useState('')
+  const [activeTab, setActiveTab] = useState('overview')
 
   if (!results) {
     return (
@@ -25,6 +45,55 @@ export default function ResultsDashboard({ results, jdFile, resumeFiles, onStart
   }
 
   const candidates = results.candidates || []
+
+  // Calculate token and cost statistics
+  const tokenStats = useMemo(() => {
+    let inputTokens = 0
+    let outputTokens = 0
+    let totalTokens = 0
+    let totalCostUSD = 0
+
+    const modelUsed = results.model || results.candidates?.[0]?.model || 'gemini-3.5-flash'
+    const pricing = getModelPricing(modelUsed)
+
+    candidates.forEach(c => {
+      const usage = c.usageMetadata || { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 }
+      inputTokens += usage.promptTokenCount
+      outputTokens += usage.candidatesTokenCount
+      totalTokens += usage.totalTokenCount
+      
+      const cost = (usage.promptTokenCount * pricing.inputRate) + (usage.candidatesTokenCount * pricing.outputRate)
+      c.cost = cost
+      c.model = modelUsed
+      totalCostUSD += cost
+    })
+
+    const totalCostINR = totalCostUSD * 83.5
+
+    // Manual screening assumptions:
+    // 5 minutes per resume, $40/hour wage -> $3.33 per resume
+    const manualCostUSD = candidates.length * 3.33
+    const manualCostINR = manualCostUSD * 83.5
+    
+    const savingsUSD = Math.max(0, manualCostUSD - totalCostUSD)
+    const savingsINR = Math.max(0, manualCostINR - totalCostINR)
+    const savingsPercent = manualCostUSD > 0 ? ((savingsUSD / manualCostUSD) * 100).toFixed(2) : '100.00'
+
+    return {
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      totalCostUSD,
+      totalCostINR,
+      modelUsed,
+      pricing,
+      manualCostUSD,
+      manualCostINR,
+      savingsUSD,
+      savingsINR,
+      savingsPercent
+    }
+  }, [candidates, results.model])
 
   // Immediate Shortlist - Strong + Good Fit (or score >= 65) sorted descending
   const shortlistCandidates = useMemo(() => {
@@ -156,295 +225,462 @@ export default function ResultsDashboard({ results, jdFile, resumeFiles, onStart
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 sm:px-8 py-8 space-y-8">
-        
-        {/* Stats Row */}
-        <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
-          <div className="bg-white rounded-2xl p-5 border-t-4 border-slate-400 shadow-sm text-center">
-            <div className="text-3xl font-extrabold text-slate-800">{results.total || 0}</div>
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Total Screened</div>
-          </div>
-          <div className="bg-white rounded-2xl p-5 border-t-4 border-green-500 shadow-sm text-center">
-            <div className="text-3xl font-extrabold text-green-600">{results.strongFit || 0}</div>
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Strong Fit</div>
-          </div>
-          <div className="bg-white rounded-2xl p-5 border-t-4 border-yellow-500 shadow-sm text-center">
-            <div className="text-3xl font-extrabold text-yellow-600">{results.goodFit || 0}</div>
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Good Fit</div>
-          </div>
-          <div className="bg-white rounded-2xl p-5 border-t-4 border-orange-500 shadow-sm text-center">
-            <div className="text-3xl font-extrabold text-orange-600">{results.possibleFit || 0}</div>
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Possible Fit</div>
-          </div>
-          <div className="bg-white rounded-2xl p-5 border-t-4 border-purple-500 shadow-sm text-center">
-            <div className="text-3xl font-extrabold text-purple-600">{results.shortlisted || 0}</div>
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Shortlisted</div>
-            {results.shortlisted > 0 && (
-              <div className="text-[10px] font-bold text-slate-400 mt-2 bg-purple-50 px-2 py-0.5 rounded inline-block">
-                Avg Score: {(shortlistCandidates.reduce((sum, c) => sum + c.scoring.finalScore, 0) / shortlistCandidates.length).toFixed(1)}
-              </div>
+      {/* Tab Navigation */}
+      <div className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+        <div className="max-w-7xl mx-auto px-6 sm:px-8 flex space-x-6">
+          <button
+            onClick={() => setActiveTab('overview')}
+            className={`py-4 px-1 text-xs font-bold border-b-2 uppercase tracking-wider transition-all duration-150 flex items-center gap-2 ${
+              activeTab === 'overview'
+                ? 'border-slate-800 text-slate-900'
+                : 'border-transparent text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            Candidates Overview
+          </button>
+          <button
+            onClick={() => setActiveTab('cost-analysis')}
+            className={`py-4 px-1 text-xs font-bold border-b-2 uppercase tracking-wider transition-all duration-150 flex items-center gap-2 ${
+              activeTab === 'cost-analysis'
+                ? 'border-slate-800 text-slate-900'
+                : 'border-transparent text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+            Token & Cost Analytics
+            {tokenStats.totalTokens > 0 && (
+              <span className="bg-emerald-100 text-emerald-800 text-[9px] px-1.5 py-0.5 rounded-full font-bold ml-1">
+                ${tokenStats.totalCostUSD.toFixed(3)}
+              </span>
             )}
-          </div>
-        </section>
+          </button>
+        </div>
+      </div>
 
-        {/* Immediate Shortlist Table */}
-        <section className="bg-blue-50/50 border border-blue-100 rounded-2xl p-6 shadow-sm">
-          <div className="flex items-center gap-2 mb-4">
-            <span className="text-yellow-500 text-lg">★</span>
-            <h2 className="text-base font-bold text-blue-900 uppercase tracking-wider">IMMEDIATE SHORTLIST — Top Candidates for Interview</h2>
-          </div>
+      <main className="max-w-7xl mx-auto px-6 sm:px-8 py-8 space-y-8">
+        {activeTab === 'overview' ? (
+          <>
+            {/* Stats Row */}
+            <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              <div className="bg-white rounded-2xl p-5 border-t-4 border-slate-400 shadow-sm text-center">
+                <div className="text-3xl font-extrabold text-slate-800">{results.total || 0}</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Total Screened</div>
+              </div>
+              <div className="bg-white rounded-2xl p-5 border-t-4 border-green-500 shadow-sm text-center">
+                <div className="text-3xl font-extrabold text-green-600">{results.strongFit || 0}</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Strong Fit</div>
+              </div>
+              <div className="bg-white rounded-2xl p-5 border-t-4 border-yellow-500 shadow-sm text-center">
+                <div className="text-3xl font-extrabold text-yellow-600">{results.goodFit || 0}</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Good Fit</div>
+              </div>
+              <div className="bg-white rounded-2xl p-5 border-t-4 border-orange-500 shadow-sm text-center">
+                <div className="text-3xl font-extrabold text-orange-600">{results.possibleFit || 0}</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Possible Fit</div>
+              </div>
+              <div className="bg-white rounded-2xl p-5 border-t-4 border-purple-500 shadow-sm text-center">
+                <div className="text-3xl font-extrabold text-purple-600">{results.shortlisted || 0}</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Shortlisted</div>
+                {results.shortlisted > 0 && (
+                  <div className="text-[10px] font-bold text-slate-400 mt-2 bg-purple-50 px-2 py-0.5 rounded inline-block">
+                    Avg Score: {(shortlistCandidates.reduce((sum, c) => sum + c.scoring.finalScore, 0) / shortlistCandidates.length).toFixed(1)}
+                  </div>
+                )}
+              </div>
+            </section>
 
-          {shortlistCandidates.length > 0 ? (
-            <div className="overflow-x-auto rounded-xl border border-blue-100 bg-white shadow-sm">
-              <table className="w-full text-sm border-collapse">
-                <thead>
-                  <tr className="bg-blue-50/60 border-b border-blue-100">
-                    <th className="text-left py-3 px-4 font-bold text-blue-900 text-xs tracking-wider uppercase">RANK</th>
-                    <th className="text-left py-3 px-4 font-bold text-blue-900 text-xs tracking-wider uppercase">NAME</th>
-                    <th className="text-left py-3 px-4 font-bold text-blue-900 text-xs tracking-wider uppercase">SCORE</th>
-                    <th className="text-left py-3 px-4 font-bold text-blue-900 text-xs tracking-wider uppercase">VERDICT</th>
-                    <th className="text-left py-3 px-4 font-bold text-blue-900 text-xs tracking-wider uppercase">KEY ACTION</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {shortlistCandidates.map((candidate, index) => (
-                    <tr
-                      key={index}
-                      className="border-b border-blue-50 hover:bg-blue-50/40 cursor-pointer transition"
-                      onClick={() => setSelectedCandidate(candidate)}
-                    >
-                      <td className="py-3.5 px-4 font-extrabold text-blue-600">#{index + 1}</td>
-                      <td className="py-3.5 px-4 font-bold text-slate-800">{candidate.candidateName}</td>
-                      <td className={`py-3.5 px-4 font-extrabold text-base ${getVerdictColor(candidate.verdictCode)}`}>
-                        <span>{candidate.scoring.finalScore}</span>
-                        {candidate.hasMandatoryFlag && candidate.scoring.finalScore >= 65 && (
-                          <span 
-                            title={candidate.missingMandatories.join(', ')}
-                            style={{ cursor: 'pointer', marginLeft: '4px', fontSize: '0.8em' }}
-                          >
-                            ⚠️
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wider ${getVerdictBgColor(candidate.verdictCode)}`}>
-                          {candidate.verdictCode.replace('_', ' ')}
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-500 text-xs truncate max-w-xs" title={candidate.recommendation}>
-                        {candidate.recommendation}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="text-center py-8 bg-white border border-blue-100 rounded-xl">
-              <p className="text-slate-400 font-semibold text-sm">No shortlisted candidates identified (Strong or Good Fit)</p>
-            </div>
-          )}
-        </section>
+            {/* Immediate Shortlist Table */}
+            <section className="bg-blue-50/50 border border-blue-100 rounded-2xl p-6 shadow-sm">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="text-yellow-500 text-lg">★</span>
+                <h2 className="text-base font-bold text-blue-900 uppercase tracking-wider">IMMEDIATE SHORTLIST — Top Candidates for Interview</h2>
+              </div>
 
-        {/* Score Distribution Bar Chart */}
-        <section className="bg-white rounded-2xl border border-slate-100 p-6 shadow-sm">
-          <h2 className="text-base font-bold text-slate-800 uppercase tracking-wider mb-6">Score Distribution — All Candidates</h2>
-          <div className="space-y-3.5">
-            {distributionCandidates.map((candidate, index) => (
-              <div 
-                key={index} 
-                className="flex items-center gap-4 hover:bg-slate-50 p-2 rounded-xl transition cursor-pointer group"
-                onClick={() => setSelectedCandidate(candidate)}
-              >
-                <div className="w-40 text-xs font-semibold text-slate-600 truncate group-hover:text-blue-600 group-hover:font-bold transition" title={candidate.candidateName}>
-                  {candidate.candidateName}
+              {shortlistCandidates.length > 0 ? (
+                <div className="overflow-x-auto rounded-xl border border-blue-100 bg-white shadow-sm">
+                  <table className="w-full text-sm border-collapse">
+                    <thead>
+                      <tr className="bg-blue-50/60 border-b border-blue-100">
+                        <th className="text-left py-3 px-4 font-bold text-blue-900 text-xs tracking-wider uppercase">RANK</th>
+                        <th className="text-left py-3 px-4 font-bold text-blue-900 text-xs tracking-wider uppercase">NAME</th>
+                        <th className="text-left py-3 px-4 font-bold text-blue-900 text-xs tracking-wider uppercase">SCORE</th>
+                        <th className="text-left py-3 px-4 font-bold text-blue-900 text-xs tracking-wider uppercase">VERDICT</th>
+                        <th className="text-left py-3 px-4 font-bold text-blue-900 text-xs tracking-wider uppercase">KEY ACTION</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {shortlistCandidates.map((candidate, index) => (
+                        <tr
+                          key={index}
+                          className="border-b border-blue-50 hover:bg-blue-50/40 cursor-pointer transition"
+                          onClick={() => setSelectedCandidate(candidate)}
+                        >
+                          <td className="py-3.5 px-4 font-extrabold text-blue-600">#{index + 1}</td>
+                          <td className="py-3.5 px-4 font-bold text-slate-800">{candidate.candidateName}</td>
+                          <td className={`py-3.5 px-4 font-extrabold text-base ${getVerdictColor(candidate.verdictCode)}`}>
+                            <span>{candidate.scoring.finalScore}</span>
+                            {candidate.hasMandatoryFlag && candidate.scoring.finalScore >= 65 && (
+                              <span 
+                                title={candidate.missingMandatories.join(', ')}
+                                style={{ cursor: 'pointer', marginLeft: '4px', fontSize: '0.8em' }}
+                              >
+                                ⚠️
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wider ${getVerdictBgColor(candidate.verdictCode)}`}>
+                              {candidate.verdictCode.replace('_', ' ')}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4 text-slate-500 text-xs truncate max-w-xs" title={candidate.recommendation}>
+                            {candidate.recommendation}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-                <div className="flex-1 bg-slate-100 rounded-full h-5 overflow-hidden shadow-inner group-hover:shadow-md transition">
-                  <div
-                    className={`h-full rounded-full transition-all duration-300 ${getVerdictBarColor(candidate.verdictCode)}`}
-                    style={{ width: `${(candidate.scoring.finalScore / 100) * 100}%` }}
+              ) : (
+                <div className="text-center py-8 bg-white border border-blue-100 rounded-xl">
+                  <p className="text-slate-400 font-semibold text-sm">No shortlisted candidates identified (Strong or Good Fit)</p>
+                </div>
+              )}
+            </section>
+
+            {/* Score Distribution Bar Chart */}
+            <section className="bg-white rounded-2xl border border-slate-100 p-6 shadow-sm">
+              <h2 className="text-base font-bold text-slate-800 uppercase tracking-wider mb-6">Score Distribution — All Candidates</h2>
+              <div className="space-y-3.5">
+                {distributionCandidates.map((candidate, index) => (
+                  <div 
+                    key={index} 
+                    className="flex items-center gap-4 hover:bg-slate-50 p-2 rounded-xl transition cursor-pointer group"
+                    onClick={() => setSelectedCandidate(candidate)}
+                  >
+                    <div className="w-40 text-xs font-semibold text-slate-600 truncate group-hover:text-blue-600 group-hover:font-bold transition" title={candidate.candidateName}>
+                      {candidate.candidateName}
+                    </div>
+                    <div className="flex-1 bg-slate-100 rounded-full h-5 overflow-hidden shadow-inner group-hover:shadow-md transition">
+                      <div
+                        className={`h-full rounded-full transition-all duration-300 ${getVerdictBarColor(candidate.verdictCode)}`}
+                        style={{ width: `${(candidate.scoring.finalScore / 100) * 100}%` }}
+                      />
+                    </div>
+                    <div className="w-12 text-right text-xs font-extrabold text-slate-700">
+                      <span>{candidate.scoring.finalScore}</span>
+                      {candidate.hasMandatoryFlag && candidate.scoring.finalScore >= 65 && (
+                        <span 
+                          title={candidate.missingMandatories.join(', ')}
+                          style={{ cursor: 'pointer', marginLeft: '4px', fontSize: '0.8em' }}
+                        >
+                          ⚠️
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Filter and Search Bar */}
+            <section className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { value: 'all', label: 'All' },
+                    { value: 'STRONG_FIT', label: 'Strong Fit' },
+                    { value: 'GOOD_FIT', label: 'Good Fit' },
+                    { value: 'POSSIBLE_FIT', label: 'Possible Fit' },
+                    { value: 'NOT_FIT', label: 'Not Fit' }
+                  ].map(filter => (
+                    <button
+                      key={filter.value}
+                      onClick={() => setFilterType(filter.value)}
+                      className={`px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider border transition-all duration-150 ${
+                        filterType === filter.value
+                          ? 'bg-slate-800 text-white border-transparent shadow-sm'
+                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      {filter.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-3 w-full md:w-auto">
+                  <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    placeholder="Search by name…"
+                    className="px-4 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-800 focus:border-transparent text-sm w-full md:w-56"
                   />
                 </div>
-                <div className="w-12 text-right text-xs font-extrabold text-slate-700">
-                  <span>{candidate.scoring.finalScore}</span>
-                  {candidate.hasMandatoryFlag && candidate.scoring.finalScore >= 65 && (
-                    <span 
-                      title={candidate.missingMandatories.join(', ')}
-                      style={{ cursor: 'pointer', marginLeft: '4px', fontSize: '0.8em' }}
-                    >
-                      ⚠️
-                    </span>
-                  )}
-                </div>
               </div>
-            ))}
-          </div>
-        </section>
+              <div className="flex justify-between items-center text-xs font-bold text-slate-400 uppercase tracking-widest pt-2 border-t border-slate-50">
+                <span>All Candidates</span>
+                <span className="text-slate-500">Showing {sortedCandidates.length} of {candidates.length}</span>
+              </div>
+            </section>
 
-        {/* Filter and Search Bar */}
-        <section className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex flex-wrap gap-2">
-              {[
-                { value: 'all', label: 'All' },
-                { value: 'STRONG_FIT', label: 'Strong Fit' },
-                { value: 'GOOD_FIT', label: 'Good Fit' },
-                { value: 'POSSIBLE_FIT', label: 'Possible Fit' },
-                { value: 'NOT_FIT', label: 'Not Fit' }
-              ].map(filter => (
-                <button
-                  key={filter.value}
-                  onClick={() => setFilterType(filter.value)}
-                  className={`px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider border transition-all duration-150 ${
-                    filterType === filter.value
-                      ? 'bg-slate-800 text-white border-transparent shadow-sm'
-                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  {filter.label}
-                </button>
-              ))}
-            </div>
-            <div className="flex flex-wrap gap-3 w-full md:w-auto">
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search by name…"
-                className="px-4 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-800 focus:border-transparent text-sm w-full md:w-56"
-              />
-            </div>
-          </div>
-          <div className="flex justify-between items-center text-xs font-bold text-slate-400 uppercase tracking-widest pt-2 border-t border-slate-50">
-            <span>All Candidates</span>
-            <span className="text-slate-500">Showing {sortedCandidates.length} of {candidates.length}</span>
-          </div>
-        </section>
+            {/* Candidate Cards Grid */}
+            <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {sortedCandidates.length > 0 ? (
+                sortedCandidates.map((candidate, index) => (
+                  <div
+                    key={index}
+                    onClick={() => setSelectedCandidate(candidate)}
+                    className="bg-white border-l-4 border border-slate-150 rounded-2xl p-5 shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer flex flex-col justify-between"
+                    style={{
+                      borderLeftColor: 
+                        candidate.verdictCode === 'STRONG_FIT' ? '#10b981' :
+                        candidate.verdictCode === 'GOOD_FIT' ? '#eab308' :
+                        candidate.verdictCode === 'POSSIBLE_FIT' ? '#f97316' :
+                        '#ef4444'
+                    }}
+                  >
+                    <div className="space-y-4">
+                      {/* Top line */}
+                      <div className="flex justify-between items-start gap-4">
+                        <div className="min-w-0">
+                          <h3 className="font-bold text-slate-800 text-base truncate" title={candidate.candidateName}>
+                            {candidate.candidateName}
+                          </h3>
+                          <p className="text-xs font-semibold text-slate-500 truncate mt-1">
+                            {candidate.currentRole || 'Not Specified'}
+                          </p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <div className={`text-2xl font-extrabold flex items-center ${getVerdictColor(candidate.verdictCode)}`}>
+                            <span>{candidate.scoring.finalScore}</span>
+                            {candidate.hasMandatoryFlag && candidate.scoring.finalScore >= 65 && (
+                              <span 
+                                title={candidate.missingMandatories.join(', ')}
+                                style={{ cursor: 'pointer', marginLeft: '4px', fontSize: '0.8em' }}
+                              >
+                                ⚠️
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mt-0.5">SCORE</span>
+                        </div>
+                      </div>
 
-        {/* Candidate Cards Grid */}
-        <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {sortedCandidates.length > 0 ? (
-            sortedCandidates.map((candidate, index) => (
-              <div
-                key={index}
-                onClick={() => setSelectedCandidate(candidate)}
-                className="bg-white border-l-4 border border-slate-150 rounded-2xl p-5 shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer flex flex-col justify-between"
-                style={{
-                  borderLeftColor: 
-                    candidate.verdictCode === 'STRONG_FIT' ? '#10b981' :
-                    candidate.verdictCode === 'GOOD_FIT' ? '#eab308' :
-                    candidate.verdictCode === 'POSSIBLE_FIT' ? '#f97316' :
-                    '#ef4444'
-                }}
-              >
-                <div className="space-y-4">
-                  {/* Top line */}
-                  <div className="flex justify-between items-start gap-4">
-                    <div className="min-w-0">
-                      <h3 className="font-bold text-slate-800 text-base truncate" title={candidate.candidateName}>
-                        {candidate.candidateName}
-                      </h3>
-                      <p className="text-xs font-semibold text-slate-500 truncate mt-1">
-                        {candidate.currentRole || 'Not Specified'}
-                      </p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <div className={`text-2xl font-extrabold flex items-center ${getVerdictColor(candidate.verdictCode)}`}>
-                        <span>{candidate.scoring.finalScore}</span>
-                        {candidate.hasMandatoryFlag && candidate.scoring.finalScore >= 65 && (
-                          <span 
-                            title={candidate.missingMandatories.join(', ')}
-                            style={{ cursor: 'pointer', marginLeft: '4px', fontSize: '0.8em' }}
-                          >
-                            ⚠️
+                      {/* Badges */}
+                      <div className="flex flex-wrap gap-1.5 items-center">
+                        <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold border uppercase tracking-wider ${getVerdictBgColor(candidate.verdictCode)}`}>
+                          {candidate.verdictCode.replace('_', ' ')}
+                        </span>
+                        {candidate.experience !== undefined && candidate.experience !== null && (
+                          <span className="bg-slate-50 text-slate-600 border border-slate-200 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
+                            {candidate.experience} Yrs
+                          </span>
+                        )}
+                        {candidate.location && (
+                          <span className="bg-slate-50 text-slate-600 border border-slate-200 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider truncate max-w-[100px]" title={candidate.location}>
+                            {candidate.location}
+                          </span>
+                        )}
+                        {isLocationMismatch(candidate.location) && (
+                          <span className="bg-orange-50 text-orange-700 border border-orange-200 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
+                            Relocation Reqd
                           </span>
                         )}
                       </div>
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mt-0.5">SCORE</span>
+
+                      {/* Score progress bars */}
+                      <div className="space-y-2 border-t border-slate-50 pt-4">
+                        {/* Quals */}
+                        <div>
+                          <div className="flex justify-between text-[10px] font-semibold text-slate-500 mb-0.5">
+                            <span>Qualifications</span>
+                            <span className="text-slate-700 font-bold">{candidate.scoring.mandatoryScore}</span>
+                          </div>
+                          <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
+                            <div 
+                              className="bg-purple-600 h-full rounded-full"
+                              style={{ width: `${parsePercent(candidate.scoring.mandatoryScore, 60)}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Skills */}
+                        <div>
+                          <div className="flex justify-between text-[10px] font-semibold text-slate-500 mb-0.5">
+                            <span>Skills</span>
+                            <span className="text-slate-700 font-bold">{candidate.scoring.skillsScore}</span>
+                          </div>
+                          <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
+                            <div 
+                              className="bg-cyan-500 h-full rounded-full"
+                              style={{ width: `${parsePercent(candidate.scoring.skillsScore, 30)}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Responsibilities */}
+                        <div>
+                          <div className="flex justify-between text-[10px] font-semibold text-slate-500 mb-0.5">
+                            <span>Responsibilities</span>
+                            <span className="text-slate-700 font-bold">{candidate.scoring.respScore}</span>
+                          </div>
+                          <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
+                            <div 
+                              className="bg-emerald-600 h-full rounded-full"
+                              style={{ width: `${parsePercent(candidate.scoring.respScore, 10)}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
                     </div>
+
+                    {/* View Details button */}
+                    <button className="mt-5 w-full bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 text-xs font-bold py-2 rounded-xl transition duration-150 border border-slate-150 uppercase tracking-widest shrink-0">
+                      View Details
+                    </button>
                   </div>
+                ))
+              ) : (
+                <div className="text-center py-16 col-span-3 bg-white border border-slate-150 rounded-2xl">
+                  <p className="text-slate-400 font-semibold text-base">No candidates match your filters and search criteria</p>
+                </div>
+              )}
+            </section>
+          </>
+        ) : (
+          <div className="space-y-8">
+            {/* Analytics Hero Section */}
+            <div className="bg-white border border-slate-150 rounded-2xl p-6 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+              <div>
+                <h2 className="text-xl font-extrabold text-slate-800 uppercase tracking-wider">Token Consumption & Pricing</h2>
+                <p className="text-xs text-slate-500 font-semibold mt-1">
+                  Gemini Model Tested: <span className="text-blue-600 font-bold bg-blue-50 px-2 py-0.5 rounded border border-blue-100">{tokenStats.modelUsed}</span>
+                </p>
+              </div>
+              <div className="flex gap-4 text-xs font-bold text-slate-600 bg-slate-50 border border-slate-150 rounded-xl p-3.5">
+                <div>
+                  <span className="text-slate-400 block font-semibold uppercase tracking-wider">Input Pricing (per 1M):</span>
+                  <span className="text-slate-800 font-bold">${tokenStats.pricing.inputPerMillion.toFixed(3)} (₹{(tokenStats.pricing.inputPerMillion * 83.5).toFixed(2)})</span>
+                </div>
+                <div className="border-l border-slate-200 pl-4">
+                  <span className="text-slate-400 block font-semibold uppercase tracking-wider">Output Pricing (per 1M):</span>
+                  <span className="text-slate-800 font-bold">${tokenStats.pricing.outputPerMillion.toFixed(3)} (₹{(tokenStats.pricing.outputPerMillion * 83.5).toFixed(2)})</span>
+                </div>
+              </div>
+            </div>
 
-                  {/* Badges */}
-                  <div className="flex flex-wrap gap-1.5 items-center">
-                    <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold border uppercase tracking-wider ${getVerdictBgColor(candidate.verdictCode)}`}>
-                      {candidate.verdictCode.replace('_', ' ')}
-                    </span>
-                    {candidate.experience !== undefined && candidate.experience !== null && (
-                      <span className="bg-slate-50 text-slate-600 border border-slate-200 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
-                        {candidate.experience} Yrs
-                      </span>
-                    )}
-                    {candidate.location && (
-                      <span className="bg-slate-50 text-slate-600 border border-slate-200 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider truncate max-w-[100px]" title={candidate.location}>
-                        {candidate.location}
-                      </span>
-                    )}
-                    {isLocationMismatch(candidate.location) && (
-                      <span className="bg-orange-50 text-orange-700 border border-orange-200 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
-                        Relocation Reqd
-                      </span>
-                    )}
+            {/* Total Metrics Cards Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div className="bg-white rounded-2xl p-5 border-t-4 border-emerald-500 shadow-sm text-center">
+                <div className="text-3xl font-extrabold text-emerald-600">${tokenStats.totalCostUSD.toFixed(4)}</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Total Cost (USD)</div>
+              </div>
+              <div className="bg-white rounded-2xl p-5 border-t-4 border-indigo-500 shadow-sm text-center">
+                <div className="text-3xl font-extrabold text-indigo-600">₹{tokenStats.totalCostINR.toFixed(2)}</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Total Cost (INR)</div>
+              </div>
+              <div className="bg-white rounded-2xl p-5 border-t-4 border-purple-500 shadow-sm text-center">
+                <div className="text-3xl font-extrabold text-purple-600">{tokenStats.totalTokens.toLocaleString()}</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Total Tokens</div>
+                <div className="text-[9px] text-slate-400 font-semibold mt-1">
+                  In: {tokenStats.inputTokens.toLocaleString()} | Out: {tokenStats.outputTokens.toLocaleString()}
+                </div>
+              </div>
+              <div className="bg-white rounded-2xl p-5 border-t-4 border-blue-500 shadow-sm text-center">
+                <div className="text-3xl font-extrabold text-blue-600">{tokenStats.savingsPercent}%</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Recruiter ROI Savings</div>
+              </div>
+            </div>
+
+            {/* ROI Cost vs Benefit Breakdown */}
+            <div className="bg-gradient-to-br from-slate-50 to-blue-50/20 border border-slate-150 rounded-2xl p-6 shadow-sm">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="text-blue-600 font-bold text-lg">💡</span>
+                <h3 className="text-sm font-bold text-blue-900 uppercase tracking-wider">Recruiter Cost vs. Benefit Analysis</h3>
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="bg-white border border-slate-150 rounded-xl p-4 shadow-xs">
+                  <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">Manual Recruiter Cost</span>
+                  <div className="flex items-baseline gap-1.5 mt-2">
+                    <span className="text-xl font-bold text-slate-800">${tokenStats.manualCostUSD.toFixed(2)}</span>
+                    <span className="text-xs font-semibold text-slate-400">/ ₹{tokenStats.manualCostINR.toFixed(2)}</span>
                   </div>
-
-                  {/* Score progress bars */}
-                  <div className="space-y-2 border-t border-slate-50 pt-4">
-                    {/* Quals */}
-                    <div>
-                      <div className="flex justify-between text-[10px] font-semibold text-slate-500 mb-0.5">
-                        <span>Qualifications</span>
-                        <span className="text-slate-700 font-bold">{candidate.scoring.mandatoryScore}</span>
-                      </div>
-                      <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
-                        <div 
-                          className="bg-purple-600 h-full rounded-full"
-                          style={{ width: `${parsePercent(candidate.scoring.mandatoryScore, 50)}%` }}
-                        />
-                      </div>
-                    </div>
-
-                    {/* Skills */}
-                    <div>
-                      <div className="flex justify-between text-[10px] font-semibold text-slate-500 mb-0.5">
-                        <span>Skills</span>
-                        <span className="text-slate-700 font-bold">{candidate.scoring.skillsScore}</span>
-                      </div>
-                      <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
-                        <div 
-                          className="bg-cyan-500 h-full rounded-full"
-                          style={{ width: `${parsePercent(candidate.scoring.skillsScore, 30)}%` }}
-                        />
-                      </div>
-                    </div>
-
-                    {/* Responsibilities */}
-                    <div>
-                      <div className="flex justify-between text-[10px] font-semibold text-slate-500 mb-0.5">
-                        <span>Responsibilities</span>
-                        <span className="text-slate-700 font-bold">{candidate.scoring.respScore}</span>
-                      </div>
-                      <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
-                        <div 
-                          className="bg-emerald-600 h-full rounded-full"
-                          style={{ width: `${parsePercent(candidate.scoring.respScore, 20)}%` }}
-                        />
-                      </div>
-                    </div>
-                  </div>
+                  <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+                    Based on manual review of <span className="font-bold">{candidates.length}</span> resumes taking ~5 minutes each at an average recruiter cost of $40 (₹3,340) per hour.
+                  </p>
                 </div>
 
-                {/* View Details button */}
-                <button className="mt-5 w-full bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 text-xs font-bold py-2 rounded-xl transition duration-150 border border-slate-150 uppercase tracking-widest shrink-0">
-                  View Details
-                </button>
-              </div>
-            ))
-          ) : (
-            <div className="text-center py-16 col-span-3 bg-white border border-slate-150 rounded-2xl">
-              <p className="text-slate-400 font-semibold text-base">No candidates match your filters and search criteria</p>
-            </div>
-          )}
-        </section>
+                <div className="bg-white border border-slate-150 rounded-xl p-4 shadow-xs">
+                  <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">AI Screening Cost</span>
+                  <div className="flex items-baseline gap-1.5 mt-2">
+                    <span className="text-xl font-bold text-emerald-600">${tokenStats.totalCostUSD.toFixed(4)}</span>
+                    <span className="text-xs font-semibold text-emerald-500">/ ₹{tokenStats.totalCostINR.toFixed(2)}</span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+                    Actual API costs billed for processing <span className="font-bold">{candidates.length}</span> resumes sequentially using {tokenStats.modelUsed}.
+                  </p>
+                </div>
 
+                <div className="bg-emerald-50/50 border border-emerald-100 rounded-xl p-4 shadow-xs">
+                  <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider block">Net Savings (ROI)</span>
+                  <div className="flex items-baseline gap-1.5 mt-2">
+                    <span className="text-xl font-bold text-emerald-700">${tokenStats.savingsUSD.toFixed(2)}</span>
+                    <span className="text-xs font-semibold text-emerald-600">/ ₹{tokenStats.savingsINR.toFixed(2)}</span>
+                  </div>
+                  <p className="text-[11px] text-emerald-600 font-medium mt-2 leading-relaxed">
+                    AI screening reduces screening costs by <span className="font-bold">{tokenStats.savingsPercent}%</span>, saving a total of <span className="font-bold">{candidates.length * 5} minutes</span> of manual screening time.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Detailed Per-Candidate Token Usage Table */}
+            <div className="bg-white border border-slate-150 rounded-2xl p-6 shadow-sm">
+              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider mb-4">Detailed Per-Candidate Token Usage</h3>
+              <div className="overflow-x-auto rounded-xl border border-slate-150 shadow-inner">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-150">
+                      <th className="text-left py-3 px-4 font-bold text-slate-600 text-xs tracking-wider uppercase">CANDIDATE NAME</th>
+                      <th className="text-left py-3 px-4 font-bold text-slate-600 text-xs tracking-wider uppercase">INPUT TOKENS</th>
+                      <th className="text-left py-3 px-4 font-bold text-slate-600 text-xs tracking-wider uppercase">OUTPUT TOKENS</th>
+                      <th className="text-left py-3 px-4 font-bold text-slate-600 text-xs tracking-wider uppercase">TOTAL TOKENS</th>
+                      <th className="text-left py-3 px-4 font-bold text-slate-600 text-xs tracking-wider uppercase">COST (USD)</th>
+                      <th className="text-left py-3 px-4 font-bold text-slate-600 text-xs tracking-wider uppercase">COST (INR)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {candidates.map((candidate, idx) => {
+                      const usage = candidate.usageMetadata || { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 }
+                      const usd = candidate.cost || 0
+                      const inr = usd * 83.5
+                      return (
+                        <tr
+                          key={idx}
+                          className="border-b border-slate-100 hover:bg-slate-50/50 transition cursor-pointer"
+                          onClick={() => setSelectedCandidate(candidate)}
+                        >
+                          <td className="py-3.5 px-4 font-bold text-slate-800">{candidate.candidateName}</td>
+                          <td className="py-3.5 px-4 text-slate-600 font-semibold">{usage.promptTokenCount.toLocaleString()}</td>
+                          <td className="py-3.5 px-4 text-slate-600 font-semibold">{usage.candidatesTokenCount.toLocaleString()}</td>
+                          <td className="py-3.5 px-4 text-slate-850 font-extrabold">{usage.totalTokenCount.toLocaleString()}</td>
+                          <td className="py-3.5 px-4 text-emerald-600 font-bold">${usd.toFixed(5)}</td>
+                          <td className="py-3.5 px-4 text-indigo-600 font-bold">₹{inr.toFixed(3)}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
 
       {/* Slide-out Detail View */}
