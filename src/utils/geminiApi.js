@@ -1,20 +1,191 @@
-import { calculateCandidateScore } from './scoringEngine'
+import { calculateCandidateScore, detectDuplicates } from './scoringEngine'
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
 
-export async function screenResumes(jdText, resumeTexts, apiKey, model, onProgress) {
+// ============================================================
+// PHASE 1.1 – JD PARSE CACHE (module-level)
+// ============================================================
+
+const jdParseCache = new Map()
+
+async function hashText(text) {
+    const normalized = text.trim()
+    const encoder = new TextEncoder()
+    const data = encoder.encode(normalized)
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+    const hashArray = Array.from(new Uint8Array(hashBuffer))
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+export async function parseJDOnce(jdText, apiKey, model) {
+  const jdHash = await hashText(jdText)
+
+  // 1. In-memory cache hit
+  if (jdParseCache.has(jdHash)) {
+    console.log('[JD Cache] In-memory hit — skipping JD parse call')
+    return { structure: jdParseCache.get(jdHash), hash: jdHash, fromCache: true }
+  }
+
+  // 2. sessionStorage cache hit (survives page refresh)
+  try {
+    const stored = sessionStorage.getItem('jdCache')
+    if (stored) {
+      const { hash: storedHash, structure } = JSON.parse(stored)
+      if (storedHash === jdHash) {
+        console.log('[JD Cache] sessionStorage hit — skipping JD parse call')
+        jdParseCache.set(jdHash, structure)
+        return { structure, hash: jdHash, fromCache: true }
+      }
+    }
+  } catch (e) { /* sessionStorage unavailable */ }
+
+  // 3. Cache miss — call Gemini to parse JD
+  console.log('[JD Cache] Miss — calling Gemini to parse JD once')
+
+  const today = new Date()
+  const currentYear = today.getFullYear()
+  const currentMonth = today.toLocaleDateString('en-US', { month: 'long' })
+  const currentDate = `${currentMonth} ${currentYear}`
+
+  const jdParsePrompt = `## SYSTEM INSTRUCTION
+
+You are a Job Description parser. Your only job is to extract the structured requirements from the job description below.
+
+OUTPUT: Valid JSON only. No text before or after. No markdown fences.
+
+Extract the following:
+1. mandatory_criteria — Requirements that are explicitly mandatory, essential, required, or "must have". Include tier for each.
+2. preferred_criteria — Requirements that are preferred, desired, nice-to-have, or bonus.
+3. skills — Specific skills mentioned (technical, domain, soft skills).
+4. responsibilities — Key responsibilities or duties the role involves.
+5. role — Job title.
+6. location — Job location if mentioned.
+
+For tier on mandatory_criteria, assign:
+- "CRITICAL" if: "mandatory", "must have", "required", "minimum X years", "essential"
+- "IMPORTANT" if: "preferred", "highly desired", "should have", "desirable", "strong"
+- "STANDARD" if: "added advantage", "nice to have", "additional", "bonus", or just listed without qualifier
+
+Current date for experience calculations: ${currentDate}
+
+OUTPUT JSON STRUCTURE:
+{
+  "role": "string",
+  "location": "string",
+  "mandatory_criteria": [
+    {
+      "id": "M1",
+      "requirement": "string",
+      "tier": "CRITICAL | IMPORTANT | STANDARD"
+    }
+  ],
+  "preferred_criteria": [
+    {
+      "id": "P1",
+      "qualification": "string"
+    }
+  ],
+  "skills": [
+    {
+      "id": "S1",
+      "skill": "string"
+    }
+  ],
+  "responsibilities": [
+    {
+      "id": "R1",
+      "responsibility": "string"
+    }
+  ]
+}`
+
+  const jdParts = buildContentParts(jdText)
+
+  const userMessage = {
+    role: 'user',
+    parts: [
+      { text: jdParsePrompt },
+      { text: '\n=== JOB DESCRIPTION ===\n' },
+      ...jdParts
+    ]
+  }
+
+  const response = await callGeminiAPI(userMessage, apiKey, model)
+  const content = response.candidates?.[0]?.content?.parts?.[0]?.text
+
+  if (!content) throw new Error('Empty response when parsing JD')
+
+  const rawJson = extractAndParseJSON(content)
+  const structure = normalizeJDStructure(rawJson)
+
+  // Validate — all arrays must be present
+  if (!structure.mandatory_criteria || !structure.skills || !structure.responsibilities) {
+    throw new Error('JD parse returned incomplete structure')
+  }
+
+  // Store in both caches
+  jdParseCache.set(jdHash, structure)
+  try {
+    sessionStorage.setItem('jdCache', JSON.stringify({ hash: jdHash, structure }))
+  } catch (e) { /* sessionStorage full or unavailable */ }
+
+  return { structure, hash: jdHash, fromCache: false }
+}
+
+function normalizeJDStructure(json) {
+  return {
+    role: json.role || 'Unknown Role',
+    location: json.location || 'Not Mentioned',
+    mandatory_criteria: (json.mandatory_criteria || []).map((m, idx) => ({
+      id: m.id || `M${idx + 1}`,
+      requirement: m.requirement || '',
+      tier: m.tier || 'STANDARD',
+      source: 'gemini'
+    })),
+    preferred_criteria: (json.preferred_criteria || []).map((p, idx) => ({
+      id: p.id || `P${idx + 1}`,
+      qualification: p.qualification || '',
+      source: 'gemini'
+    })),
+    skills: (json.skills || []).map((s, idx) => ({
+      id: s.id || `S${idx + 1}`,
+      skill: s.skill || '',
+      source: 'gemini'
+    })),
+    responsibilities: (json.responsibilities || []).map((r, idx) => ({
+      id: r.id || `R${idx + 1}`,
+      responsibility: r.responsibility || '',
+      source: 'gemini'
+    }))
+  }
+}
+
+export function clearJDCache() {
+  jdParseCache.clear()
+  try { sessionStorage.removeItem('jdCache') } catch (e) { /* ignore */ }
+}
+
+export async function screenResumes(confirmedJD, resumeTexts, apiKey, model, onProgress) {
   try {
     const screeningPrompt = localStorage.getItem('screeningPrompt') || getDefaultPrompt()
     let completedCount = 0
 
+    const dedupResult = await detectDuplicates(resumeTexts)
+    const uniqueResumes = dedupResult.uniqueResumes
+    const duplicatesFound = dedupResult.duplicates
+
+    if (duplicatesFound.length > 0) {
+      console.warn(`[Dedup] Found ${duplicatesFound.length} duplicate(s):`, duplicatesFound.map(d => d.name))
+    }
+
     const candidates = []
 
     // Run resume screening sequentially to prevent concurrent rate limits or API errors
-    for (let i = 0; i < resumeTexts.length; i++) {
-      const resume = resumeTexts[i]
+    for (let i = 0; i < uniqueResumes.length; i++) {
+      const resume = uniqueResumes[i]
       try {
         const result = await analyzeResume(
-          jdText,
+          confirmedJD,
           resume.text,
           screeningPrompt,
           apiKey,
@@ -28,33 +199,33 @@ export async function screenResumes(jdText, resumeTexts, apiKey, model, onProgre
       }
       completedCount++
       if (onProgress) {
-        onProgress(Math.round((completedCount / resumeTexts.length) * 100))
+        onProgress(Math.round((completedCount / uniqueResumes.length) * 100))
       }
     }
 
-    return aggregateResults(candidates)
+    return aggregateResults(candidates, model, duplicatesFound)
   } catch (error) {
     throw new Error(`Gemini API Error: ${error.message}`)
   }
 }
 
-async function analyzeResume(jdText, resumeText, prompt, apiKey, model, filename = '') {
-  const jdParts = buildContentParts(jdText)
+async function analyzeResume(confirmedJD, resumeText, prompt, apiKey, model, filename = '') {
+  const jdAsText = JSON.stringify(confirmedJD, null, 2)
   const resumeParts = buildContentParts(resumeText)
 
   const userMessage = {
     role: 'user',
     parts: [
       { text: prompt },
-      { text: '\n=== JOB DESCRIPTION ===\n' },
-      ...jdParts,
+      { text: '\n=== JOB DESCRIPTION (PRE-PARSED STRUCTURE) ===\n' },
+      { text: jdAsText },
       { text: '\n=== RESUME ===\n' },
       ...resumeParts
     ]
   }
 
   const response = await callGeminiAPI(userMessage, apiKey, model)
-  return parseGeminiResponse(response, resumeText, filename)
+  return parseGeminiResponse(response, resumeText, filename, model)
 }
 
 function buildContentParts(content) {
@@ -394,7 +565,7 @@ function normalizeResponseStructure(json, filename, resumeText) {
   return norm
 }
 
-function parseGeminiResponse(response, resumeText, filename = '') {
+function parseGeminiResponse(response, resumeText, filename = '', model = '') {
   const candidate = response.candidates?.[0]
   const finishReason = candidate?.finishReason
   const content = candidate?.content?.parts?.[0]?.text
@@ -425,6 +596,14 @@ function parseGeminiResponse(response, resumeText, filename = '') {
   // Use the deterministic scoring engine
   const scored = calculateCandidateScore(normalizedJson)
 
+  // Attach usage metadata and model to the scored object
+  scored.usageMetadata = {
+    promptTokenCount: response.usageMetadata?.promptTokenCount || 0,
+    candidatesTokenCount: response.usageMetadata?.candidatesTokenCount || 0,
+    totalTokenCount: response.usageMetadata?.totalTokenCount || 0
+  }
+  scored.model = model
+
   return scored
 }
 
@@ -436,9 +615,9 @@ function createErrorCandidate(name, errorMessage) {
     location: 'N/A',
     resumeQuality: 'POOR',
     scoring: {
-      mandatoryScore: '0/50',
+      mandatoryScore: '0/60',
       skillsScore: '0/30',
-      respScore: '0/20',
+      respScore: '0/10',
       preferredBonus: '+0',
       rawScore: 0,
       capApplied: 'None',
@@ -455,11 +634,29 @@ function createErrorCandidate(name, errorMessage) {
     mandatoryDetail: [],
     skillsDetail: [],
     respDetail: [],
-    preferredDetail: []
+    preferredDetail: [],
+    usageMetadata: {
+      promptTokenCount: 0,
+      candidatesTokenCount: 0,
+      totalTokenCount: 0
+    },
+    model: ''
   }
 }
 
-function aggregateResults(candidates) {
+function aggregateResults(candidates, model, duplicatesFound = []) {
+  let totalInputTokens = 0
+  let totalOutputTokens = 0
+  let totalTokens = 0
+
+  for (const candidate of candidates) {
+    if (candidate.usageMetadata) {
+      totalInputTokens += candidate.usageMetadata.promptTokenCount || 0
+      totalOutputTokens += candidate.usageMetadata.candidatesTokenCount || 0
+      totalTokens += candidate.usageMetadata.totalTokenCount || 0
+    }
+  }
+
   const results = {
     total: candidates.length,
     strongFit: 0,
@@ -468,7 +665,14 @@ function aggregateResults(candidates) {
     notFit: 0,
     hardReject: 0,
     shortlisted: 0,
-    candidates: candidates
+    candidates: candidates,
+    duplicatesFound,
+    model: model,
+    usageMetadata: {
+      promptTokenCount: totalInputTokens,
+      candidatesTokenCount: totalOutputTokens,
+      totalTokenCount: totalTokens
+    }
   }
 
   for (const candidate of candidates) {
