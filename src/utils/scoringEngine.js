@@ -68,12 +68,13 @@ function calculateCandidateScore(llmOutput) {
     const respScore =
         respTotal > 0 ? (respYes / respTotal) * WEIGHTS.RESPONSIBILITIES : 0;
 
-    // Preferred Bonus (max +10)
+    // Preferred - evaluated but no bonus applied
+    // Preferred items are informational only for recruiter
     const preferredYes = preferred.filter((p) => p.answer === "YES").length;
-    const preferredBonus = Math.min(preferredYes * 2, 10);
+    const preferredBonus = 0;
 
-    // Raw total before caps
-    let rawScore = mandatoryScore + skillsScore + respScore + preferredBonus;
+    // Raw total
+    let rawScore = mandatoryScore + skillsScore + respScore;
 
     // ----------------------------------------------------------
     // STEP 4: Apply tier caps (deterministic rules)
@@ -87,7 +88,7 @@ function calculateCandidateScore(llmOutput) {
     // ----------------------------------------------------------
     let verdict;
 
-    if (criticalMissing.length >= 2) {
+    if (criticalMissing.length >= 1) {
         verdict = "HARD_REJECT";
     } else if (finalScore >= VERDICT_THRESHOLDS.STRONG_FIT) {
         verdict = "STRONG_FIT";
@@ -179,7 +180,7 @@ function buildResult(params) {
         });
     }
 
-    const hasMandatoryFlag = missingMandatories.length > 0;
+    const hasMandatoryFlag = failedMandatories.length > 0 && finalScore >= 65;
 
     return {
         candidateName,
@@ -192,7 +193,7 @@ function buildResult(params) {
             mandatoryScore: `${mandatoryScore}/${WEIGHTS.MANDATORY}`,
             skillsScore: `${skillsScore}/${WEIGHTS.SKILLS}`,
             respScore: `${respScore}/${WEIGHTS.RESPONSIBILITIES}`,
-            preferredBonus: `+${preferredBonus}`,
+            preferredBonus: `+0 (informational only)`,
             rawScore,
             capApplied: capApplied || "None",
             finalScore,
