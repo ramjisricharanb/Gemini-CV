@@ -1,9 +1,10 @@
 import { useState, useRef } from 'react'
 import { validateFiles } from '../utils/fileProcessor'
+import { clearJDCache } from '../utils/geminiApi'
 
-export default function FileUpload({ onSubmit }) {
-  const [jdFile, setJdFile] = useState(null)
-  const [resumeFiles, setResumeFiles] = useState([])
+export default function FileUpload({ onSubmit, initialJdFile = null, initialResumeFiles = [] }) {
+  const [jdFile, setJdFile] = useState(initialJdFile)
+  const [resumeFiles, setResumeFiles] = useState(initialResumeFiles)
   const [error, setError] = useState('')
   const [isJdDragging, setIsJdDragging] = useState(false)
   const [isResumeDragging, setIsResumeDragging] = useState(false)
@@ -12,6 +13,7 @@ export default function FileUpload({ onSubmit }) {
   const resumeInputRef = useRef(null)
 
   const handleJdChange = (e) => {
+    clearJDCache()
     const file = e.target.files[0]
     if (file) {
       setJdFile(file)
@@ -65,6 +67,7 @@ export default function FileUpload({ onSubmit }) {
 
   const handleJdDrop = (e) => {
     e.preventDefault()
+    clearJDCache()
     setIsJdDragging(false)
     const file = e.dataTransfer.files[0]
     if (file) {
