@@ -1,3 +1,13 @@
+function normalizeExtractedText(text) {
+  if (!text) return ''
+
+  return text
+    .trim()                              // Remove leading/trailing whitespace
+    .replace(/\s+/g, ' ')               // Collapse multiple spaces to single space
+    .replace(/\n\s*\n/g, '\n')          // Remove blank lines (keep single newlines)
+    .replace(/[\r\t]/g, '')             // Remove carriage returns and tabs
+}
+
 export async function extractTextFromFile(file) {
   const ext = file.name.toLowerCase().split('.').pop()
 
@@ -26,18 +36,18 @@ async function extractPdfText(file) {
     if (!window.pdfjsLib) {
       throw new Error('PDF.js not loaded')
     }
-    
+
     const pdf = await window.pdfjsLib.getDocument(await file.arrayBuffer()).promise
     let text = ''
-    
+
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i)
       const content = await page.getTextContent()
       text += content.items.map(item => item.str).join(' ')
       text += '\n'
     }
-    
-    return text
+
+    return normalizeExtractedText(text)
   } catch (error) {
     console.warn('PDF extraction failed, returning raw text:', error)
     return await file.text()
@@ -52,7 +62,7 @@ async function extractDocxText(file) {
 
     const arrayBuffer = await file.arrayBuffer()
     const result = await window.mammoth.extractRawText({ arrayBuffer })
-    return result.value
+    return normalizeExtractedText(result.value)
   } catch (error) {
     console.warn('DOCX extraction failed:', error)
     return await file.text()
